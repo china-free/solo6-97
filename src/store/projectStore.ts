@@ -22,16 +22,20 @@ interface ProjectActions {
   addProject: (project: Omit<Project, 'id' | 'createdAt' | 'updatedAt' | 'order'>) => void;
   updateProject: (id: string, data: Partial<Project>) => void;
   deleteProject: (id: string) => void;
-  reorderProjects: (activeId: string, overId: string) => void;
+  moveProject: (activeId: string, overId: string) => void;
   addMilestone: (projectId: string, milestone: Omit<Milestone, 'id'>) => void;
   updateMilestone: (projectId: string, milestoneId: string, data: Partial<Milestone>) => void;
   deleteMilestone: (projectId: string, milestoneId: string) => void;
+  getFilteredProjects: () => Project[];
+  getSortedProjects: (projects: Project[]) => Project[];
   getFilteredAndSortedProjects: () => Project[];
 }
 
+const STORAGE_KEY = 'portfolio-projects';
+
 const loadFromStorage = (): Project[] | null => {
   try {
-    const stored = localStorage.getItem('portfolio-projects');
+    const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       return JSON.parse(stored);
     }
@@ -43,7 +47,7 @@ const loadFromStorage = (): Project[] | null => {
 
 const saveToStorage = (projects: Project[]) => {
   try {
-    localStorage.setItem('portfolio-projects', JSON.stringify(projects));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
   } catch (e) {
     console.error('Failed to save projects to localStorage', e);
   }
@@ -53,8 +57,40 @@ const generateId = () => {
   return Date.now().toString(36) + Math.random().toString(36).substr(2);
 };
 
+const getInitialProjects = (): Project[] => {
+  const stored = loadFromStorage();
+  if (stored) {
+    const hasOrderField = stored.every((p) => typeof p.order === 'number');
+    if (hasOrderField) {
+      return stored;
+    }
+    return stored.map((p, i) => ({ ...p, order: i }));
+  }
+  return mockProjects.map((p, i) => ({ ...p, order: i * 1000 }));
+};
+
+const computeOrderBetween = (before: number | null, after: number | null): number => {
+  if (before === null && after === null) {
+    return 1000;
+  }
+  if (before === null) {
+    return after! - 1000;
+  }
+  if (after === null) {
+    return before + 1000;
+  }
+  return (before + after) / 2;
+};
+
+const MIN_ORDER_DIFF = 1e-6;
+
+const renormalizeOrders = (projects: Project[]): Project[] => {
+  const sorted = [...projects].sort((a, b) => a.order - b.order);
+  return sorted.map((p, i) => ({ ...p, order: i * 1000 }));
+};
+
 export const useProjectStore = create<ProjectState & ProjectActions>((set, get) => {
-  const initialProjects = loadFromStorage() || mockProjects;
+  const initialProjects = getInitialProjects();
   
   return {
     projects: initialProjects,
@@ -73,20 +109,27 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     setEditingProject: (project) => set({ editingProject: project, isFormOpen: true }),
 
     addProject: (projectData) => {
+      const { projects } = get();
+      const maxOrder = projects.length > 0 
+        ? Math.max(...projects.map((p) => p.order)) 
+        : 0;
+      
       const newProject: Project = {
         ...projectData,
         id: generateId(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        order: get().projects.length,
+        order: maxOrder + 1000,
       };
-      const newProjects = [...get().projects, newProject];
+      
+      const newProjects = [...projects, newProject];
       set({ projects: newProjects });
       saveToStorage(newProjects);
     },
 
     updateProject: (id, data) => {
-      const newProjects = get().projects.map((p) =>
+      const { projects } = get();
+      const newProjects = projects.map((p) =>
         p.id === id ? { ...p, ...data, updatedAt: new Date().toISOString() } : p
       );
       set({ projects: newProjects });
@@ -94,35 +137,118 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     },
 
     deleteProject: (id) => {
-      const newProjects = get().projects.filter((p) => p.id !== id);
+      const { projects, selectedProjectId } = get();
+      const newProjects = projects.filter((p) => p.id !== id);
       set({ 
         projects: newProjects,
-        selectedProjectId: get().selectedProjectId === id ? null : get().selectedProjectId,
+        selectedProjectId: selectedProjectId === id ? null : selectedProjectId,
       });
       saveToStorage(newProjects);
     },
 
-    reorderProjects: (activeId, overId) => {
-      const projects = [...get().projects];
-      const activeIndex = projects.findIndex((p) => p.id === activeId);
-      const overIndex = projects.findIndex((p) => p.id === overId);
+    moveProject: (activeId, overId) => {
+      const { projects, filterType, filterStatus } = get();
+
+      const projectMap = new Map(projects.map((p) => [p.id, p]));
+      const activeProject = projectMap.get(activeId);
+      const overProject = projectMap.get(overId);
+
+      if (!activeProject || !overProject) return;
+      if (activeId === overId) return;
+
+      const globalSorted = [...projects].sort((a, b) => a.order - b.order);
+      const globalOverIndex = globalSorted.findIndex((p) => p.id === overId);
+      
+      if (globalOverIndex === -1) return;
+
+      let filteredProjects = [...projects];
+      if (filterType !== 'all') {
+        filteredProjects = filteredProjects.filter((p) => p.type === filterType);
+      }
+      if (filterStatus !== 'all') {
+        filteredProjects = filteredProjects.filter((p) => p.status === filterStatus);
+      }
+      filteredProjects.sort((a, b) => a.order - b.order);
+
+      const activeIndex = filteredProjects.findIndex((p) => p.id === activeId);
+      const overIndex = filteredProjects.findIndex((p) => p.id === overId);
       
       if (activeIndex === -1 || overIndex === -1) return;
-      
-      const [removed] = projects.splice(activeIndex, 1);
-      projects.splice(overIndex, 0, removed);
-      
-      const reorderedProjects = projects.map((p, index) => ({ ...p, order: index }));
-      set({ projects: reorderedProjects });
-      saveToStorage(reorderedProjects);
+
+      let prevOrder: number | null = null;
+      let nextOrder: number | null = null;
+
+      if (activeIndex < overIndex) {
+        prevOrder = overProject.order;
+        nextOrder = globalOverIndex < globalSorted.length - 1
+          ? globalSorted[globalOverIndex + 1].order
+          : null;
+      } else {
+        prevOrder = globalOverIndex > 0
+          ? globalSorted[globalOverIndex - 1].order
+          : null;
+        nextOrder = overProject.order;
+      }
+
+      let newOrder = computeOrderBetween(prevOrder, nextOrder);
+
+      if (
+        (prevOrder !== null && Math.abs(newOrder - prevOrder) < MIN_ORDER_DIFF) ||
+        (nextOrder !== null && Math.abs(newOrder - nextOrder) < MIN_ORDER_DIFF)
+      ) {
+        const renormalized = renormalizeOrders(projects);
+        const renormSorted = [...renormalized].sort((a, b) => a.order - b.order);
+        const renormOverIndex = renormSorted.findIndex((p) => p.id === overId);
+        const renormActive = renormSorted.find((p) => p.id === activeId);
+        
+        if (renormOverIndex === -1 || !renormActive) return;
+        
+        const renormFiltered = renormalized.filter((p) => 
+          (filterType === 'all' || p.type === filterType) &&
+          (filterStatus === 'all' || p.status === filterStatus)
+        ).sort((a, b) => a.order - b.order);
+        
+        const renormActiveIndex = renormFiltered.findIndex((p) => p.id === activeId);
+        const renormOverIndexFiltered = renormFiltered.findIndex((p) => p.id === overId);
+        
+        if (renormActiveIndex < renormOverIndexFiltered) {
+          prevOrder = renormSorted[renormOverIndex].order;
+          nextOrder = renormOverIndex < renormSorted.length - 1
+            ? renormSorted[renormOverIndex + 1].order
+            : null;
+        } else {
+          prevOrder = renormOverIndex > 0
+            ? renormSorted[renormOverIndex - 1].order
+            : null;
+          nextOrder = renormSorted[renormOverIndex].order;
+        }
+        
+        newOrder = computeOrderBetween(prevOrder, nextOrder);
+        
+        const finalProjects = renormalized.map((p) =>
+          p.id === activeId ? { ...p, order: newOrder } : p
+        );
+        
+        set({ projects: finalProjects });
+        saveToStorage(finalProjects);
+        return;
+      }
+
+      const newProjects = projects.map((p) =>
+        p.id === activeId ? { ...p, order: newOrder } : p
+      );
+
+      set({ projects: newProjects });
+      saveToStorage(newProjects);
     },
 
     addMilestone: (projectId, milestone) => {
+      const { projects } = get();
       const newMilestone: Milestone = {
         ...milestone,
         id: generateId(),
       };
-      const newProjects = get().projects.map((p) =>
+      const newProjects = projects.map((p) =>
         p.id === projectId
           ? {
               ...p,
@@ -136,7 +262,8 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     },
 
     updateMilestone: (projectId, milestoneId, data) => {
-      const newProjects = get().projects.map((p) =>
+      const { projects } = get();
+      const newProjects = projects.map((p) =>
         p.id === projectId
           ? {
               ...p,
@@ -152,7 +279,8 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
     },
 
     deleteMilestone: (projectId, milestoneId) => {
-      const newProjects = get().projects.map((p) =>
+      const { projects } = get();
+      const newProjects = projects.map((p) =>
         p.id === projectId
           ? {
               ...p,
@@ -165,8 +293,8 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
       saveToStorage(newProjects);
     },
 
-    getFilteredAndSortedProjects: () => {
-      const { projects, filterType, filterStatus, sortType } = get();
+    getFilteredProjects: () => {
+      const { projects, filterType, filterStatus } = get();
       
       let filtered = projects;
       
@@ -178,7 +306,13 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
         filtered = filtered.filter((p) => p.status === filterStatus);
       }
       
-      const sorted = [...filtered];
+      return filtered;
+    },
+
+    getSortedProjects: (projectsList) => {
+      const { sortType } = get();
+      
+      const sorted = [...projectsList];
       switch (sortType) {
         case 'manual':
           sorted.sort((a, b) => a.order - b.order);
@@ -195,6 +329,11 @@ export const useProjectStore = create<ProjectState & ProjectActions>((set, get) 
       }
       
       return sorted;
+    },
+
+    getFilteredAndSortedProjects: () => {
+      const filtered = get().getFilteredProjects();
+      return get().getSortedProjects(filtered);
     },
   };
 });

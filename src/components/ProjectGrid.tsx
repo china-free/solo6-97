@@ -8,18 +8,26 @@ import {
   useSensor,
   useSensors,
   DragEndEvent,
+  DragStartEvent,
+  DragOverlay,
 } from '@dnd-kit/core';
 import {
-  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   rectSortingStrategy,
 } from '@dnd-kit/sortable';
 import { FolderOpen } from 'lucide-react';
+import { useState } from 'react';
+import type { Project } from '@/types';
 
 export function ProjectGrid() {
-  const { projects, getFilteredAndSortedProjects, reorderProjects, sortType } = useProjectStore();
+  const { projects, getFilteredAndSortedProjects, moveProject, sortType } = useProjectStore();
   const filteredProjects = getFilteredAndSortedProjects();
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  const activeProject = activeId
+    ? projects.find((p) => p.id === activeId) || null
+    : null;
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -32,11 +40,16 @@ export function ProjectGrid() {
     })
   );
 
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(String(event.active.id));
+  };
+
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
+    setActiveId(null);
 
     if (over && active.id !== over.id) {
-      reorderProjects(String(active.id), String(over.id));
+      moveProject(String(active.id), String(over.id));
     }
   };
 
@@ -60,6 +73,7 @@ export function ProjectGrid() {
     <DndContext
       sensors={sensors}
       collisionDetection={closestCenter}
+      onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
     >
       <SortableContext
@@ -73,6 +87,31 @@ export function ProjectGrid() {
           ))}
         </div>
       </SortableContext>
+
+      <DragOverlay>
+        {activeProject ? (
+          <DragOverlayCard project={activeProject} />
+        ) : null}
+      </DragOverlay>
     </DndContext>
+  );
+}
+
+function DragOverlayCard({ project }: { project: Project }) {
+  return (
+    <div className="w-full max-w-sm bg-white dark:bg-zinc-900 rounded-2xl overflow-hidden border border-zinc-200 dark:border-zinc-700 shadow-2xl opacity-90 rotate-2">
+      <div className="aspect-[4/3] overflow-hidden bg-zinc-100 dark:bg-zinc-800">
+        <img
+          src={project.coverImage}
+          alt={project.name}
+          className="w-full h-full object-cover"
+        />
+      </div>
+      <div className="p-4">
+        <h3 className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+          {project.name}
+        </h3>
+      </div>
+    </div>
   );
 }
