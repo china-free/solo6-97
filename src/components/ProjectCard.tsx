@@ -86,7 +86,7 @@ export function ProjectCard({ project }: ProjectCardProps) {
           loading="lazy"
         />
         
-        <div className="absolute top-3 left-3 right-3 flex justify-between items-start">
+        <div className="absolute top-3 left-3 flex flex-col gap-2">
           <span className={cn(
             'px-2.5 py-1 text-xs font-medium rounded-full',
             statusColors[project.status]
